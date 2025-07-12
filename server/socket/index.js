@@ -1,62 +1,84 @@
-const { findOrCreateUser, setUserOffline } = require('../controllers/userController');
-const { findOrCreateRoom } = require('../controllers/roomController');
+const jwt   = require('jsonwebtoken');
+const User  = require('../models/User');
+const { findOrCreateRoom }  = require('../controllers/roomController');
 const { createRoomMessage } = require('../controllers/messageController');
-const User = require('../models/User');
-const Room = require('../models/Room');
 
-const socketHandler = (io) => {
+const JWT_SECRET = process.env.JWT_SECRET || 'supersecret';
+
+module.exports = (io) => {
+  // ── JWT handshake guard ────────────────────────────────────────────
+  io.use(async (socket, next) => {
+    try {
+      const token = socket.handshake.auth?.token;
+      if (!token) throw new Error('Auth token missing');
+
+      const { id } = jwt.verify(token, JWT_SECRET);
+      const user = await User.findById(id);
+      if (!user) throw new Error('User not found');
+
+      socket.data.user = user;      // attach to socket
+      next();
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ── Per‑connection handlers ────────────────────────────────────────
   io.on('connection', (socket) => {
-    console.log(`User connected: ${socket.id}`);
+    console.log('🟢', socket.id, 'connected');
 
-    socket.on('join_room', async ({ username, roomName }) => {
+    // join a room
+    socket.on('join_room', async ({ roomName }) => {
       try {
-        const user = await findOrCreateUser(username, socket.id);
-        const room = await findOrCreateRoom(roomName, user._id);
+        const user = socket.data.user;
+        user.socketId = socket.id;
+        user.online   = true;
+        await user.save();
 
+        const room = await findOrCreateRoom(roomName, user._id);
         socket.join(room.name);
 
         io.to(room.name).emit('user_joined_room', {
           user: { id: user._id, username: user.username },
-          room: room.name,
         });
-
-        console.log(`${user.username} joined room: ${room.name}`);
       } catch (err) {
         console.error('join_room error:', err.message);
       }
     });
 
-    socket.on('send_message_to_room', async ({ roomName, content, senderName }) => {
+    // send message
+    socket.on('send_message_to_room', async ({ roomName, content }) => {
       try {
-        const sender = await User.findOne({ username: senderName });
-        const room = await Room.findOne({ name: roomName });
-
-        if (!sender || !room) return;
-
-        const message = await createRoomMessage(content, sender._id, room._id);
+        const user = socket.data.user;
+        const room = await findOrCreateRoom(roomName, user._id);
+        const msg  = await createRoomMessage(content, user._id, room._id);
 
         io.to(room.name).emit('receive_message', {
-          content,
-          sender: sender.username,
-          room: room.name,
-          timestamp: message.timestamp,
+          id: msg._id,
+          sender: user.username,
+          message: content,
+          timestamp: msg.createdAt,
         });
       } catch (err) {
         console.error('send_message_to_room error:', err.message);
       }
     });
 
+    // typing
+    socket.on('typing', (isTyping) => {
+      const user = socket.data.user;
+      if (isTyping) socket.to(socket.rooms).emit('typing_users', [user.username]);
+      else socket.to(socket.rooms).emit('typing_users', []);
+    });
+
+    // disconnect
     socket.on('disconnect', async () => {
-      try {
-        const user = await setUserOffline(socket.id);
-        if (user) {
-          console.log(`${user.username} disconnected`);
-        }
-      } catch (err) {
-        console.error('disconnect error:', err.message);
+      const user = socket.data.user;
+      if (user) {
+        user.online = false;
+        await user.save();
       }
+      console.log('🔴', socket.id, 'disconnected');
     });
   });
 };
-
-module.exports = socketHandler;

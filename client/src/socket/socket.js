@@ -1,12 +1,11 @@
-// socket.js - Socket.io client setup
+// socket.js – client singleton + React hook (JWT‑aware)
 
 import { io } from 'socket.io-client';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
-// Socket.io connection URL
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:5000';
 
-// Create socket instance
+/* ── Singleton ───────────────────────────────────────────────────── */
 export const socket = io(SOCKET_URL, {
   autoConnect: false,
   reconnection: true,
@@ -14,136 +13,70 @@ export const socket = io(SOCKET_URL, {
   reconnectionDelay: 1000,
 });
 
-// Custom hook for using socket.io
+/* ── Hook ─────────────────────────────────────────────────────────── */
 export const useSocket = () => {
   const [isConnected, setIsConnected] = useState(socket.connected);
-  const [lastMessage, setLastMessage] = useState(null);
-  const [messages, setMessages] = useState([]);
-  const [users, setUsers] = useState([]);
+  const [messages,    setMessages]    = useState([]);
   const [typingUsers, setTypingUsers] = useState([]);
+  const [users,       setUsers]       = useState([]);
 
-  // Connect to socket server
-  const connect = (username) => {
+  const usernameRef = useRef('');
+  const roomRef     = useRef('general');
+
+  /* connect + join room (sends JWT via socket.auth) */
+  const connect = (username, roomName = 'general') => {
+    usernameRef.current = username;
+    roomRef.current     = roomName;
+
+    // add JWT to handshake payload
+    const token = localStorage.getItem('token');
+    socket.auth = { token };
     socket.connect();
-    if (username) {
-      socket.emit('user_join', username);
-    }
+
+    socket.emit('join_room', { roomName });
   };
 
-  // Disconnect from socket server
-  const disconnect = () => {
-    socket.disconnect();
-  };
+  const disconnect        = () => socket.disconnect();
+  const setTyping         = (is) => socket.emit('typing', is);
+  const sendPrivate       = (to, msg) => socket.emit('private_message', { to, message: msg });
+  const sendMessage       = (content) =>
+    socket.emit('send_message_to_room', {
+      roomName: roomRef.current,
+      content,
+    });
 
-  // Send a message
-  const sendMessage = (message) => {
-    socket.emit('send_message', { message });
-  };
-
-  // Send a private message
-  const sendPrivateMessage = (to, message) => {
-    socket.emit('private_message', { to, message });
-  };
-
-  // Set typing status
-  const setTyping = (isTyping) => {
-    socket.emit('typing', isTyping);
-  };
-
-  // Socket event listeners
+  /* register listeners once */
   useEffect(() => {
-    // Connection events
-    const onConnect = () => {
-      setIsConnected(true);
-    };
+    socket.on('connect',    () => setIsConnected(true));
+    socket.on('disconnect', () => setIsConnected(false));
 
-    const onDisconnect = () => {
-      setIsConnected(false);
-    };
+    socket.on('receive_message', (m) => setMessages((p) => [...p, m]));
+    socket.on('private_message', (m) => setMessages((p) => [...p, m]));
 
-    // Message events
-    const onReceiveMessage = (message) => {
-      setLastMessage(message);
-      setMessages((prev) => [...prev, message]);
-    };
+    socket.on('user_joined_room', ({ user }) =>
+      setMessages((p) => [
+        ...p,
+        { id: Date.now(), system: true, message: `${user.username} joined`, timestamp: new Date().toISOString() },
+      ])
+    );
 
-    const onPrivateMessage = (message) => {
-      setLastMessage(message);
-      setMessages((prev) => [...prev, message]);
-    };
+    socket.on('user_list',      setUsers);
+    socket.on('typing_users',   setTypingUsers);
 
-    // User events
-    const onUserList = (userList) => {
-      setUsers(userList);
-    };
-
-    const onUserJoined = (user) => {
-      // You could add a system message here
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: Date.now(),
-          system: true,
-          message: `${user.username} joined the chat`,
-          timestamp: new Date().toISOString(),
-        },
-      ]);
-    };
-
-    const onUserLeft = (user) => {
-      // You could add a system message here
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: Date.now(),
-          system: true,
-          message: `${user.username} left the chat`,
-          timestamp: new Date().toISOString(),
-        },
-      ]);
-    };
-
-    // Typing events
-    const onTypingUsers = (users) => {
-      setTypingUsers(users);
-    };
-
-    // Register event listeners
-    socket.on('connect', onConnect);
-    socket.on('disconnect', onDisconnect);
-    socket.on('receive_message', onReceiveMessage);
-    socket.on('private_message', onPrivateMessage);
-    socket.on('user_list', onUserList);
-    socket.on('user_joined', onUserJoined);
-    socket.on('user_left', onUserLeft);
-    socket.on('typing_users', onTypingUsers);
-
-    // Clean up event listeners
-    return () => {
-      socket.off('connect', onConnect);
-      socket.off('disconnect', onDisconnect);
-      socket.off('receive_message', onReceiveMessage);
-      socket.off('private_message', onPrivateMessage);
-      socket.off('user_list', onUserList);
-      socket.off('user_joined', onUserJoined);
-      socket.off('user_left', onUserLeft);
-      socket.off('typing_users', onTypingUsers);
-    };
+    return () => socket.off();
   }, []);
 
   return {
-    socket,
     isConnected,
-    lastMessage,
     messages,
-    users,
     typingUsers,
+    users,
     connect,
     disconnect,
-    sendMessage,
-    sendPrivateMessage,
     setTyping,
+    sendMessage,
+    sendPrivateMessage: sendPrivate,
   };
 };
 
-export default socket; 
+export default socket;
